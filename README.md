@@ -1,4 +1,4 @@
-Como vocês usam Issabel, o melhor jeito é usando:
+O melhor jeito é usando:
 
 Zabbix
 n8n
