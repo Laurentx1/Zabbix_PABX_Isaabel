@@ -1,115 +1,162 @@
-O melhor jeito é usando:
+# Alertas automáticos com Zabbix + n8n + Issabel
 
-Zabbix
-n8n
-AMI do Asterisk (que roda dentro do Issabel)
-Objetivo
+Quando um evento crítico acontece no Zabbix, o sistema dispara uma ligação automática para um ramal via Issabel (Asterisk), reproduzindo uma mensagem de alerta de voz.
 
-Quando um alerta crítico acontecer no Zabbix:
+---
 
-o Zabbix envia webhook
-o n8n recebe
-o Issabel faz ligação automática para um ramal
-toca mensagem de alerta.
-Arquitetura
-Zabbix
-   ↓ Webhook
-n8n
-   ↓ HTTP/AMI
-Issabel (Asterisk)
-   ↓
-Ramal SIP
-PASSO 1 — Habilitar AMI no Issabel
+## Arquitetura
 
-Acesse o servidor Issabel:
+```
+Zabbix ──(webhook)──► n8n ──(AMI/HTTP)──► Issabel (Asterisk) ──► Ramal SIP
+```
 
+---
+
+## Pré-requisitos
+
+| Componente | Função |
+|---|---|
+| **Zabbix** | Monitoramento e disparo de alertas |
+| **n8n** | Orquestração do webhook e chamada HTTP |
+| **Issabel / Asterisk** | Central telefônica — faz a ligação |
+| **Ramal SIP** | Destino da chamada de alerta |
+
+---
+
+## Passo 1 — Habilitar AMI no Issabel
+
+Acesse o servidor e edite o arquivo de configuração do manager:
+
+```bash
 nano /etc/asterisk/manager_custom.conf
+```
 
-Adicione:
+Adicione o usuário de acesso:
 
+```ini
 [alertabot]
 secret=SenhaForte123
 deny=0.0.0.0/0.0.0.0
 permit=SEU_IP_N8N/255.255.255.255
 read=all
 write=all
-Reinicie o Asterisk
+```
+
+Recarregue o manager sem precisar reiniciar tudo:
+
+```bash
 asterisk -rx "manager reload"
+```
 
-ou:
+Ou, se preferir reiniciar o serviço completo:
 
+```bash
 systemctl restart asterisk
-PASSO 2 — Testar porta AMI
+```
 
-AMI usa:
+---
 
-porta 5038
+## Passo 2 — Testar conectividade com o AMI
 
-Teste:
+O AMI escuta na porta `5038`. Verifique se está acessível:
 
+```bash
 telnet IP_DO_ISSABEL 5038
+```
 
-Deve aparecer:
+Resposta esperada:
 
-Asterisk Call Manager
-PASSO 3 — Criar contexto de chamada
+```
+Asterisk Call Manager/...
+```
 
-Edite:
+Se não conectar, verifique o firewall do servidor Issabel.
 
+---
+
+## Passo 3 — Criar contexto de chamada no Asterisk
+
+Edite o arquivo de extensões customizadas:
+
+```bash
 nano /etc/asterisk/extensions_custom.conf
+```
 
-Adicione:
+Adicione o contexto de alerta:
 
+```ini
 [alerta-zabbix]
 exten => 999,1,Answer()
  same => n,Playback(custom/alerta)
  same => n,Hangup()
-PASSO 4 — Criar áudio
+```
 
-Coloque áudio:
+> O Asterisk vai atender a chamada, reproduzir o arquivo de áudio `alerta` e desligar.
 
+---
+
+## Passo 4 — Criar o áudio de alerta
+
+Coloque o arquivo de áudio no caminho correto:
+
+```
 /var/lib/asterisk/sounds/custom/alerta.wav
+```
 
-Formato:
+Especificações obrigatórias do arquivo:
 
-WAV
-mono
-8000hz
-PASSO 5 — Testar ligação manual
+- Formato: **WAV**
+- Canais: **mono**
+- Taxa de amostragem: **8000 Hz**
 
-No Issabel:
+> Arquivos fora desse padrão podem não tocar corretamente ou causar ruído.
 
+---
+
+## Passo 5 — Testar a ligação manualmente
+
+Antes de integrar com o n8n, valide que o Asterisk consegue fazer a ligação:
+
+```bash
 asterisk -rx "channel originate SIP/200 extension 999@alerta-zabbix"
+```
 
-Troque:
+Substitua `200` pelo número do ramal de destino.
 
-200 = ramal
+**Resultado esperado:** o telefone do ramal toca e o áudio de alerta é reproduzido.
 
-Se funcionar:
+---
 
-o telefone toca
-áudio executa.
-PASSO 6 — Criar webhook no n8n
-Workflow
-Node 1 — Webhook
+## Passo 6 — Criar workflow no n8n
 
-Recebe alerta do Zabbix.
+### Node 1 — Webhook
 
-Exemplo payload:
+Configure um node **Webhook** para receber os alertas do Zabbix.
 
+Exemplo de payload enviado pelo Zabbix:
+
+```json
 {
   "host": "FW-MATRIZ",
   "severity": "DISASTER",
   "problem": "Firewall Offline"
 }
-PASSO 7 — Node HTTP Request
+```
 
-No n8n:
+---
 
-método: POST
-URL:
-http://IP_ISSABEL:8088/rawman
-Body
+## Passo 7 — Node HTTP Request (originar chamada)
+
+Adicione um node **HTTP Request** com as seguintes configurações:
+
+| Campo | Valor |
+|---|---|
+| Método | `POST` |
+| URL | `http://IP_ISSABEL:8088/rawman` |
+
+Body da requisição (texto plano, `Content-Type: text/plain`):
+
+```
 Action: Login
 Username: alertabot
 Secret: SenhaForte123
@@ -121,39 +168,59 @@ Exten: 999
 Priority: 1
 
 Action: Logoff
-PASSO 8 — Configurar webhook no Zabbix
+```
 
-No:
+> Substitua `SIP/200` pelo ramal que deve receber a ligação.
 
-Alerts
-Media Types
-Webhook
+---
 
-ou:
+## Passo 8 — Configurar webhook no Zabbix
 
-Actions → Operations → webhook.
+No Zabbix, vá em **Alerts → Media Types → Webhook** (ou **Actions → Operations**) e configure:
 
-URL:
+| Campo | Valor |
+|---|---|
+| URL | `http://IP_N8N/webhook/zabbix-alert` |
+| Método | `POST` |
+| Content-Type | `application/json` |
 
-http://IP_N8N/webhook/zabbix-alert
-PASSO 9 — Filtrar apenas DISASTER
+Vincule o media type a um usuário e configure o trigger de alerta para usar essa action.
 
-No n8n:
+---
 
-IF severity == DISASTER
+## Passo 9 — Filtrar apenas alertas críticos
 
-Então:
+No n8n, adicione um node **IF** entre o Webhook e o HTTP Request:
 
-faz ligação
-senão ignora.
-RESULTADO FINAL
+```
+severity == DISASTER
+```
 
-Quando cair:
+- **Verdadeiro** → executa o HTTP Request (faz a ligação)
+- **Falso** → encerra o workflow sem ação
 
-firewall
-link
-VM
-Proxmox
-servidor
+Isso evita ligações desnecessárias para alertas de baixa severidade.
 
-O ramal toca automaticamente.
+---
+
+## Resultado
+
+Quando qualquer um dos eventos abaixo for detectado pelo Zabbix com severidade **DISASTER**:
+
+- Firewall offline
+- Link de internet caído
+- VM inacessível
+- Host Proxmox fora do ar
+- Servidor sem resposta
+
+→ O ramal configurado **toca automaticamente** com a mensagem de alerta de voz.
+
+---
+
+## Dicas adicionais
+
+**Múltiplos ramais:** para ligar para mais de um ramal, repita o bloco `Action: Originate` no body com canais diferentes, ou crie um loop no n8n.
+
+**Mensagens dinâmicas:** use o campo `problem` do payload do Zabbix para gerar áudios com text-to-speech (ex: via ElevenLabs ou Google TTS) antes de chamar o Issabel.
+
+**Retry em caso de falha:** adicione um node de retry no n8n caso o Issabel não responda na primeira tentativa.
